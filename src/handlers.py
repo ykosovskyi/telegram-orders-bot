@@ -5,15 +5,16 @@
 
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 from aiogram import Bot, F, Router, html
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 
 import config
 import database
+import export
 import keyboards
 from states import OrderForm
 
@@ -80,8 +81,28 @@ async def cmd_orders(message: Message) -> None:
     await message.answer("Последние заявки:\n\n" + "\n\n".join(lines))
 
 
-@router.message(Command("orders"))
-async def cmd_orders_denied(message: Message) -> None:
+@router.message(Command("export"), F.from_user.id == config.ADMIN_ID)
+async def cmd_export(message: Message) -> None:
+    # Файл кладём рядом с базой, отправляем и сразу удаляем
+    path = config.DB_PATH.parent / f"заявки_{date.today()}.xlsx"
+    count = export.export_orders_to_xlsx(path)
+    if count == 0:
+        path.unlink(missing_ok=True)
+        await message.answer("Заявок пока нет — выгружать нечего.")
+        return
+    try:
+        await message.answer_document(
+            FSInputFile(path),
+            caption=f"Все заявки: {count} шт.",
+        )
+    finally:
+        # Удаляем временный файл даже если отправка сорвалась
+        path.unlink(missing_ok=True)
+
+
+@router.message(Command("orders", "export"))
+async def admin_command_denied(message: Message) -> None:
+    # Сюда попадают все, кто не прошёл фильтр по ADMIN_ID выше
     await message.answer("Эта команда доступна только администратору. 🙂")
 
 
