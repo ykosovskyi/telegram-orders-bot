@@ -5,12 +5,14 @@
 
 import logging
 import re
+from datetime import datetime
 
-from aiogram import F, Router, html
+from aiogram import Bot, F, Router, html
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
+import config
 import database
 import keyboards
 from states import OrderForm
@@ -52,6 +54,57 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
         "Заявка отменена. Если передумаете — нажмите /start.",
         reply_markup=ReplyKeyboardRemove(),
     )
+
+
+# ---------- Админские команды ----------
+# Регистрируем их до шагов диалога: хендлеры проверяются в порядке объявления,
+# и иначе /orders посреди заполнения формы был бы принят как имя или задача.
+
+@router.message(Command("orders"), F.from_user.id == config.ADMIN_ID)
+async def cmd_orders(message: Message) -> None:
+    orders = database.get_last_orders(10)
+    if not orders:
+        await message.answer("Заявок пока нет.")
+        return
+
+    lines = []
+    for row in orders:
+        username = f"@{row['tg_username']}" if row["tg_username"] else "—"
+        # Задачу обрезаем, иначе 10 длинных заявок не влезут в лимит сообщения
+        task = row["task"] if len(row["task"]) <= 100 else row["task"][:100] + "…"
+        lines.append(
+            f"<b>№{row['id']}</b> · {row['created_at']}\n"
+            f"{html.quote(row['name'])}, {html.quote(row['phone'])}, {html.quote(username)}\n"
+            f"{html.quote(task)}"
+        )
+    await message.answer("Последние заявки:\n\n" + "\n\n".join(lines))
+
+
+@router.message(Command("orders"))
+async def cmd_orders_denied(message: Message) -> None:
+    await message.answer("Эта команда доступна только администратору. 🙂")
+
+
+async def notify_admin(bot: Bot, order_id: int, name: str, phone: str, task: str,
+                       username: str | None) -> None:
+    """Отправить админу уведомление о новой заявке.
+
+    Ошибка отправки (например, админ ещё не написал боту /start) не должна
+    ломать диалог с клиентом — поэтому только логируем её.
+    """
+    username_text = f"@{username}" if username else "—"
+    text = (
+        f"🔔 Новая заявка <b>№{order_id}</b>\n\n"
+        f"<b>Имя:</b> {html.quote(name)}\n"
+        f"<b>Телефон:</b> {html.quote(phone)}\n"
+        f"<b>Telegram:</b> {html.quote(username_text)}\n"
+        f"<b>Задача:</b> {html.quote(task)}\n"
+        f"<b>Время:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    try:
+        await bot.send_message(config.ADMIN_ID, text)
+    except Exception:
+        logger.exception("Не удалось отправить уведомление админу")
 
 
 @router.callback_query(F.data == "new_order")
@@ -155,6 +208,15 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext) -> None:
         tg_username=callback.from_user.username,
     )
     logger.info("Новая заявка №%d от %s (%s)", order_id, data["name"], data["phone"])
+
+    await notify_admin(
+        callback.bot,
+        order_id,
+        name=data["name"],
+        phone=data["phone"],
+        task=data["task"],
+        username=callback.from_user.username,
+    )
 
     # Убираем кнопки под сообщением с заявкой, чтобы не нажали второй раз
     await callback.message.edit_reply_markup(reply_markup=None)
