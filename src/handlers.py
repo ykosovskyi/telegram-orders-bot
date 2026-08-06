@@ -34,7 +34,9 @@ def normalize_phone(raw: str) -> str | None:
 # ---------- Старт и отмена ----------
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    # /start посреди диалога сбрасывает его — начинаем с чистого листа
+    await state.clear()
     await message.answer(
         "Здравствуйте! 👋\n\n"
         "Я принимаю заявки: расскажите о своей задаче, "
@@ -158,8 +160,16 @@ async def process_name(message: Message, state: FSMContext) -> None:
 
 @router.message(OrderForm.phone, F.contact)
 async def process_phone_contact(message: Message, state: FSMContext) -> None:
-    # Пользователь нажал «Поделиться контактом» — Telegram присылает номер
-    # без плюса, добавляем его сами (номер всегда в международном формате)
+    # Из записной книжки можно переслать чужой контакт — принимаем только свой
+    if message.contact.user_id != message.from_user.id:
+        await message.answer(
+            "Похоже, это чужой контакт. 🙂\n"
+            "Отправьте, пожалуйста, свой номер кнопкой ниже или введите вручную.",
+            reply_markup=keyboards.phone_kb,
+        )
+        return
+    # Кнопка «Поделиться контактом» присылает номер без плюса,
+    # добавляем его сами (номер всегда в международном формате)
     phone = message.contact.phone_number
     if not phone.startswith("+"):
         phone = "+" + phone
@@ -239,8 +249,13 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext) -> None:
         username=callback.from_user.username,
     )
 
-    # Убираем кнопки под сообщением с заявкой, чтобы не нажали второй раз
-    await callback.message.edit_reply_markup(reply_markup=None)
+    # Убираем кнопки под сообщением с заявкой, чтобы не нажали второй раз.
+    # Заявка уже в базе, поэтому сбой правки сообщения не должен
+    # оставить клиента без подтверждения — только логируем
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        logger.exception("Не удалось убрать кнопки у сообщения с заявкой")
     await callback.message.answer(
         f"Спасибо! Ваша заявка <b>№{order_id}</b> принята. ✅\n"
         "Мы свяжемся с вами в ближайшее время."
